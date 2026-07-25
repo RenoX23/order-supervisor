@@ -1,0 +1,50 @@
+# Local development stack for the Order Supervisor POC.
+#
+#   postgres  — application database (runs, activity_log, supervisors)
+#   temporal  — Temporal dev server (self-contained, SQLite-backed) + Web UI on :8233
+#
+# The Temporal dev server keeps its own state; it does NOT use the postgres
+# service above. Our application data lives only in `postgres`.
+#
+# Bring it up with:  docker compose up -d
+name: order-supervisor
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: order-supervisor-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-supervisor}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supervisor}
+      POSTGRES_DB: ${POSTGRES_DB:-order_supervisor}
+    ports:
+      # Mapped to 5442 on the host to avoid clashing with a local Postgres on 5432.
+      - "${POSTGRES_HOST_PORT:-5442}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-supervisor} -d ${POSTGRES_DB:-order_supervisor}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  temporal:
+    image: temporalio/temporal:latest
+    container_name: order-supervisor-temporal
+    restart: unless-stopped
+    # Run as root so the process can write its SQLite file into the (root-owned)
+    # named volume below; the image's default `temporal` user cannot.
+    user: root
+    # `temporal server start-dev` is a self-contained dev server: gRPC frontend on
+    # 7233 and the Temporal Web UI on 8233 (the port CLAUDE.md refers to).
+    command: ["server", "start-dev", "--ip", "0.0.0.0", "--db-filename", "/data/temporal.db"]
+    ports:
+      - "7233:7233"   # gRPC frontend (workers + clients connect here)
+      - "8233:8233"   # Web UI  ->  http://localhost:8233
+    volumes:
+      - temporaldata:/data
+
+volumes:
+  pgdata:
+  temporaldata:
