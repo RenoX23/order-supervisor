@@ -234,6 +234,10 @@ class OrderSupervisorWorkflow:
     async def _wait_while_paused(self) -> None:
         self._status = "interrupted"
         self._sleeping = False
+        # Persist the paused status BEFORE blocking, otherwise the API (which
+        # reads Postgres) would never observe "interrupted" — the wait below only
+        # returns on resume, by which point the status is back to "running".
+        await self._flush()
         await workflow.wait_condition(
             lambda: not self._interrupted or self._terminate_requested or self._terminal
         )
