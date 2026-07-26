@@ -16,6 +16,8 @@ from app.temporal.workflows import OrderSupervisorWorkflow
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 
+TERMINAL_STATUSES = {"completed", "terminated", "failed"}
+
 
 def _supervisor_config(sup: dict) -> SupervisorConfig:
     return SupervisorConfig(
@@ -31,6 +33,18 @@ async def _load_run(run_id: str) -> dict:
     run = await persistence.get_run(run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="run not found")
+    return run
+
+
+async def _load_active_run(run_id: str) -> dict:
+    """Load a run and reject signals if it has already ended.
+
+    Without this, a signal-with-start event fired at a closed workflow would
+    start a brand-new execution instead of no-op'ing.
+    """
+    run = await _load_run(run_id)
+    if run["status"] in TERMINAL_STATUSES:
+        raise HTTPException(status_code=409, detail=f"run already {run['status']}")
     return run
 
 
@@ -83,7 +97,7 @@ async def get_run(run_id: str) -> dict:
 
 @router.post("/{run_id}/events")
 async def inject_event(run_id: str, body: EventIn, client: Client = Depends(get_temporal)) -> dict:
-    run = await _load_run(run_id)
+    run = await _load_active_run(run_id)
     run_input = await _run_input_for(run)
     # Deliberately the SAME signal-with-start path as run creation (CLAUDE.md rule 2).
     await tclient.start_or_signal_event(client, run_input, OrderEvent(type=body.type, payload=body.payload))
@@ -92,28 +106,28 @@ async def inject_event(run_id: str, body: EventIn, client: Client = Depends(get_
 
 @router.post("/{run_id}/instructions")
 async def add_instruction(run_id: str, body: InstructionIn, client: Client = Depends(get_temporal)) -> dict:
-    run = await _load_run(run_id)
+    run = await _load_active_run(run_id)
     await tclient.signal(client, run["order_id"], OrderSupervisorWorkflow.add_instruction, body.text)
     return {"ok": True, "run_id": run_id}
 
 
 @router.post("/{run_id}/interrupt")
 async def interrupt(run_id: str, client: Client = Depends(get_temporal)) -> dict:
-    run = await _load_run(run_id)
+    run = await _load_active_run(run_id)
     await tclient.signal(client, run["order_id"], OrderSupervisorWorkflow.interrupt)
     return {"ok": True, "run_id": run_id}
 
 
 @router.post("/{run_id}/resume")
 async def resume(run_id: str, client: Client = Depends(get_temporal)) -> dict:
-    run = await _load_run(run_id)
+    run = await _load_active_run(run_id)
     await tclient.signal(client, run["order_id"], OrderSupervisorWorkflow.resume)
     return {"ok": True, "run_id": run_id}
 
 
 @router.post("/{run_id}/terminate")
 async def terminate(run_id: str, body: TerminateIn, client: Client = Depends(get_temporal)) -> dict:
-    run = await _load_run(run_id)
+    run = await _load_active_run(run_id)
     # Graceful terminate signal so the workflow still produces its final summary.
     await tclient.signal(client, run["order_id"], OrderSupervisorWorkflow.terminate, body.reason)
     return {"ok": True, "run_id": run_id}

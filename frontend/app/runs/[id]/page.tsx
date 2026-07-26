@@ -37,7 +37,6 @@ export default function RunDetailPage() {
   const { id } = useParams<{ id: string }>();
   const [run, setRun] = useState<RunDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [eventType, setEventType] = useState<string>("payment_failed");
   const [instruction, setInstruction] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -62,6 +61,22 @@ export default function RunDetailPage() {
     try {
       await fn();
       await load();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Fire a realistic order lifecycle, spaced so the agent processes each step.
+  async function runScenario() {
+    setBusy(true);
+    try {
+      for (const t of ["payment_confirmed", "shipment_created", "shipment_delayed", "delivered"]) {
+        await api.injectEvent(id, t);
+        await load();
+        await new Promise((r) => setTimeout(r, 4000));
+      }
     } catch (e) {
       setError(String(e));
     } finally {
@@ -126,28 +141,27 @@ export default function RunDetailPage() {
       </Panel>
 
       <div className="grid gap-4 md:grid-cols-2">
-        {/* inject event (also the event generator: fires any of the 9 types) */}
-        <Panel title="Inject event">
-          <div className="flex gap-2">
-            <select
-              className="flex-1 rounded border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm"
-              value={eventType}
-              onChange={(e) => setEventType(e.target.value)}
-            >
-              {EVENT_TYPES.map((t) => (
-                <option key={t} value={t}>
-                  {t}
-                </option>
-              ))}
-            </select>
-            <button
-              disabled={busy || terminal}
-              onClick={() => act(() => api.injectEvent(id, eventType))}
-              className="rounded bg-sky-600 px-3 py-1.5 text-sm hover:bg-sky-500 disabled:opacity-50"
-            >
-              Send
-            </button>
+        {/* event generator: one click fires any of the 9 event types into the run */}
+        <Panel title="Event generator">
+          <div className="grid grid-cols-2 gap-1.5">
+            {EVENT_TYPES.map((t) => (
+              <button
+                key={t}
+                disabled={busy || terminal}
+                onClick={() => act(() => api.injectEvent(id, t))}
+                className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-left text-xs hover:bg-slate-800 disabled:opacity-40"
+              >
+                {t}
+              </button>
+            ))}
           </div>
+          <button
+            disabled={busy || terminal}
+            onClick={runScenario}
+            className="mt-2 w-full rounded bg-indigo-600 px-2 py-1.5 text-xs font-medium hover:bg-indigo-500 disabled:opacity-40"
+          >
+            ▶ Simulate lifecycle (confirmed → shipped → delayed → delivered)
+          </button>
         </Panel>
 
         {/* add instruction */}
