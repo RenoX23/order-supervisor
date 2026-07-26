@@ -30,6 +30,16 @@ EVENT_TYPES: tuple[str, ...] = (
 # completion rule — the agent never ends the run by itself (see CLAUDE.md rule 4).
 TERMINAL_EVENT_TYPES: frozenset[str] = frozenset({"delivered"})
 
+# The five simulated actions the agent may take. Each is recorded as an
+# activity_log row (type=agent_action) — nothing external is called.
+ACTION_TYPES: tuple[str, ...] = (
+    "message_fulfillment_team",
+    "message_payments_team",
+    "message_logistics_team",
+    "message_customer",
+    "create_internal_note",
+)
+
 # ── activity_log.type values (mirror the DB CHECK constraint in 0001_init.sql) ─
 LOG_EVENT = "event"
 LOG_AGENT_ACTION = "agent_action"
@@ -113,6 +123,22 @@ class TimelineEntry:
     ts: str  # ISO-8601 (deterministic workflow time)
     type: str  # one of the LOG_* values above
     payload: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class PersistStepInput:
+    """One batched write of new timeline entries + a run-row patch.
+
+    The workflow flushes this through the ``persist_step`` activity; every field
+    except ``run_id``/``entries`` is optional and only applied when non-null.
+    """
+
+    run_id: str
+    entries: list[TimelineEntry] = field(default_factory=list)
+    memory_summary: Optional[str] = None
+    status: Optional[str] = None
+    next_wake_at: Optional[str] = None
+    final_summary: Optional[dict[str, Any]] = None
 
 
 @dataclass

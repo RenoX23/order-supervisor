@@ -27,9 +27,15 @@ class Settings(BaseSettings):
     temporal_namespace: str = "default"
     temporal_task_queue: str = "order-supervisor"
 
-    # ── LLM (used from the agent stage onward) ────────────────────────────────
-    anthropic_api_key: str = ""
-    llm_model: str = ""
+    # ── LLM (agent step) ──────────────────────────────────────────────────────
+    # OpenAI-compatible endpoint. Defaults target Groq's free tier; point these at
+    # OpenAI, Gemini's OpenAI endpoint, or a local Ollama server to switch provider
+    # with no code change. The agent call lives entirely inside one activity.
+    llm_base_url: str = "https://api.groq.com/openai/v1"
+    llm_api_key: str = ""
+    llm_model: str = "llama-3.3-70b-versatile"
+    llm_temperature: float = 0.2
+    llm_timeout_seconds: float = 30.0
 
 
 settings = Settings()

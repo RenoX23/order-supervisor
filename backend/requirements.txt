@@ -12,8 +12,8 @@ asyncpg>=0.30,<0.31
 pydantic>=2.9,<3.0
 pydantic-settings>=2.6,<3.0
 
-# LLM (used from the agent stage onward)
-anthropic>=0.42,<1.0
+# LLM (agent step) — OpenAI-compatible client (Groq by default)
+openai>=1.50,<2.0
 
 # Dev / tests
 pytest>=8.3,<9.0

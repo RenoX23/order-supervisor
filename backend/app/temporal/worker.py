@@ -14,7 +14,8 @@ from temporalio.client import Client
 from temporalio.worker import Worker
 
 from app.config import settings
-from app.temporal.activities import agent_decide, build_final_summary
+from app.db import close_pool
+from app.temporal.activities import agent_decide, build_final_summary, persist_step
 from app.temporal.workflows import OrderSupervisorWorkflow
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -27,7 +28,7 @@ async def main() -> None:
         client,
         task_queue=settings.temporal_task_queue,
         workflows=[OrderSupervisorWorkflow],
-        activities=[agent_decide, build_final_summary],
+        activities=[agent_decide, build_final_summary, persist_step],
     )
     log.info(
         "Worker connected to %s (ns=%s); polling task queue '%s'. Ctrl+C to stop.",
@@ -35,7 +36,10 @@ async def main() -> None:
         settings.temporal_namespace,
         settings.temporal_task_queue,
     )
-    await worker.run()
+    try:
+        await worker.run()
+    finally:
+        await close_pool()
 
 
 if __name__ == "__main__":

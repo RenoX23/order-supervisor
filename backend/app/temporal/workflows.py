@@ -25,7 +25,7 @@ from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from app.temporal import policy
-    from app.temporal.activities import agent_decide, build_final_summary
+    from app.temporal.activities import agent_decide, build_final_summary, persist_step
     from app.temporal.shared import (
         LOG_AGENT_ACTION,
         LOG_EVENT,
@@ -36,6 +36,7 @@ with workflow.unsafe.imports_passed_through():
         TERMINAL_EVENT_TYPES,
         AgentStepInput,
         OrderEvent,
+        PersistStepInput,
         RunInput,
         TimelineEntry,
         WorkflowStateView,
@@ -64,6 +65,7 @@ class OrderSupervisorWorkflow:
         # Timeline + compact memory.
         self._timeline: list[TimelineEntry] = []
         self._seq: int = 0
+        self._persisted_seq: int = 0  # high-water mark flushed to Postgres
         self._memory_summary: str = ""
         self._last_reasoning: str | None = None
 
@@ -100,11 +102,13 @@ class OrderSupervisorWorkflow:
 
         # Trigger 1 — run the agent on start.
         await self._run_agent("start")
+        await self._flush()
 
         # Triggers 2 & 3 — important signals and scheduled wake-ups.
         while not self._terminal and not self._terminate_requested:
             if self._interrupted:
                 await self._wait_while_paused()
+                await self._flush()
                 continue
 
             if self._exceeded_max_age():
@@ -114,6 +118,7 @@ class OrderSupervisorWorkflow:
             remaining = self._seconds_until_wake()
             if remaining <= 0:
                 await self._run_agent("scheduled")
+                await self._flush()
                 continue
 
             self._enter_sleep()
@@ -135,8 +140,10 @@ class OrderSupervisorWorkflow:
                 await self._handle_signal_wake()
             else:
                 await self._run_agent("scheduled")
+            await self._flush()
 
         await self._finalize()
+        await self._flush()
         return self._final_summary or {}
 
     # ── signals ───────────────────────────────────────────────────────────────
@@ -303,9 +310,9 @@ class OrderSupervisorWorkflow:
         self._log(LOG_AGENT_ACTION, {"reasoning": decision.reasoning})
 
         for action in decision.actions:
-            # Stage 4: business actions (message_*, create_internal_note) will be
-            # dispatched through activities that persist an activity_log row. For
-            # now they are recorded in the in-memory timeline only.
+            # Each simulated action (message_*, create_internal_note) is recorded to
+            # the timeline and flushed to activity_log via persist_step — that IS the
+            # action, per the brief (nothing external is called).
             self._log(LOG_AGENT_ACTION, {"action_type": action.type, "params": action.params})
 
         if decision.memory_update:
@@ -364,6 +371,32 @@ class OrderSupervisorWorkflow:
         self._final_summary = summary
         self._log(LOG_FINAL_OUTPUT, summary)
         self._status = "terminated" if self._terminate_requested else "completed"
+
+    # ── persistence ─────────────────────────────────────────────────────────────
+    async def _flush(self) -> None:
+        """Persist newly-added timeline entries and the current run patch.
+
+        Batches everything since the last flush into one activity call. A no-op
+        without a run_id (e.g. direct/script starts) — persistence is opt-in on
+        the run row created by the API/CLI.
+        """
+        new_entries = [t for t in self._timeline if t.seq > self._persisted_seq]
+        self._persisted_seq = self._seq
+        if not self._input or not self._input.run_id:
+            return
+        await workflow.execute_activity(
+            persist_step,
+            PersistStepInput(
+                run_id=self._input.run_id,
+                entries=new_entries,
+                memory_summary=self._memory_summary,
+                status=self._status,
+                next_wake_at=self._next_wake_at.isoformat() if self._next_wake_at else None,
+                final_summary=self._final_summary,
+            ),
+            start_to_close_timeout=_ACTIVITY_TIMEOUT,
+            retry_policy=_ACTIVITY_RETRY,
+        )
 
     # ── timeline ────────────────────────────────────────────────────────────────
     def _log(self, entry_type: str, payload: dict) -> None:

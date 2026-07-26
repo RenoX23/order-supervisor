@@ -29,7 +29,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from temporalio.client import Client, WorkflowHandle  # noqa: E402
 
+from app import persistence  # noqa: E402
 from app.config import settings  # noqa: E402
+from app.db import close_pool  # noqa: E402
 from app.temporal.shared import OrderEvent, RunInput, SupervisorConfig  # noqa: E402
 from app.temporal.workflows import OrderSupervisorWorkflow  # noqa: E402
 
@@ -50,23 +52,47 @@ def _handle(client: Client, order_id: str) -> WorkflowHandle:
     return client.get_workflow_handle(workflow_id(order_id))
 
 
+async def _create_run_row(order_id: str, supervisor: SupervisorConfig) -> str:
+    """Create the supervisor + run rows (mirrors what the Stage 5 API will do)."""
+    supervisor_id = await persistence.create_supervisor(
+        name=supervisor.name,
+        base_instruction=supervisor.base_instruction,
+        tools_enabled=supervisor.tools_enabled,
+        wake_policy=supervisor.wake_policy,
+        model_config=supervisor.model_config,
+    )
+    return await persistence.create_run(
+        supervisor_id=supervisor_id,
+        order_id=order_id,
+        workflow_id=workflow_id(order_id),
+        status="pending",
+    )
+
+
+def _default_supervisor(name: str, sleep: int, max_age: int) -> SupervisorConfig:
+    return SupervisorConfig(
+        name=name,
+        base_instruction="Watch this order from creation to completion and keep it on track.",
+        tools_enabled=list(
+            (
+                "message_fulfillment_team",
+                "message_payments_team",
+                "message_logistics_team",
+                "message_customer",
+                "create_internal_note",
+            )
+        ),
+        wake_policy={"default_sleep_seconds": sleep, "max_age_seconds": max_age},
+    )
+
+
 # ── commands ──────────────────────────────────────────────────────────────────
 
 async def cmd_start(args) -> None:
     client = await _client()
-    supervisor = SupervisorConfig(
-        name=args.supervisor,
-        base_instruction="Watch this order from creation to completion and keep it on track.",
-        tools_enabled=[
-            "message_fulfillment_team",
-            "message_payments_team",
-            "message_logistics_team",
-            "message_customer",
-            "create_internal_note",
-        ],
-        wake_policy={"default_sleep_seconds": args.sleep, "max_age_seconds": args.max_age},
-    )
-    run_input = RunInput(order_id=args.order_id, supervisor=supervisor, run_id=f"run-{args.order_id}")
+    supervisor = _default_supervisor(args.supervisor, args.sleep, args.max_age)
+    run_id = await _create_run_row(args.order_id, supervisor)
+    run_input = RunInput(order_id=args.order_id, supervisor=supervisor, run_id=run_id)
 
     # signal-with-start: the first order_created event both creates the workflow
     # and is delivered as its first signal.
@@ -135,12 +161,9 @@ async def cmd_demo(args) -> None:
     print(f"DEMO: sleep -> wake cycle for order '{oid}'")
     print("=" * 72)
 
-    supervisor = SupervisorConfig(
-        name="Demo Supervisor",
-        base_instruction="Watch this order from creation to completion.",
-        wake_policy={"default_sleep_seconds": args.sleep, "max_age_seconds": args.max_age},
-    )
-    run_input = RunInput(order_id=oid, supervisor=supervisor, run_id=f"run-{oid}")
+    supervisor = _default_supervisor("Demo Supervisor", args.sleep, args.max_age)
+    run_id = await _create_run_row(oid, supervisor)
+    run_input = RunInput(order_id=oid, supervisor=supervisor, run_id=run_id)
     handle = await client.start_workflow(
         OrderSupervisorWorkflow.run,
         run_input,
@@ -319,9 +342,16 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+async def _run(args) -> None:
+    try:
+        await args.func(args)
+    finally:
+        await close_pool()  # close the DB pool if any command opened it
+
+
 def main() -> None:
     args = build_parser().parse_args()
-    asyncio.run(args.func(args))
+    asyncio.run(_run(args))
 
 
 if __name__ == "__main__":
