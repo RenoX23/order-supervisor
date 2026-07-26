@@ -113,6 +113,7 @@ class AgentStepInput:
     events: list[OrderEvent] = field(default_factory=list)
     new_instructions: list[str] = field(default_factory=list)
     recent_timeline: list[dict[str, Any]] = field(default_factory=list)
+    tools_enabled: list[str] = field(default_factory=list)  # actions this supervisor may take
 
 
 # ── Timeline + queryable state ────────────────────────────────────────────────

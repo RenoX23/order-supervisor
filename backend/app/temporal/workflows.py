@@ -301,6 +301,7 @@ class OrderSupervisorWorkflow:
             events=events,
             new_instructions=new_instructions,
             recent_timeline=[{"type": t.type, "payload": t.payload} for t in self._timeline[-10:]],
+            tools_enabled=list(self._input.supervisor.tools_enabled),
         )
 
         decision = await workflow.execute_activity(

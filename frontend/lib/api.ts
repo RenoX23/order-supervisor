@@ -71,6 +71,7 @@ export const api = {
   createSupervisor: (body: {
     name: string;
     base_instruction: string;
+    tools_enabled?: string[];
     wake_policy?: Record<string, unknown>;
   }) => req<Supervisor>("/supervisors", { method: "POST", body: JSON.stringify(body) }),
 

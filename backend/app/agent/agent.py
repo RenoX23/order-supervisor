@@ -38,51 +38,72 @@ def _get_client() -> AsyncOpenAI:
 
 # ── decision tool schema (structured output) ─────────────────────────────────
 
-_DECISION_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "submit_decision",
-        "description": "Record your supervision decision for this step.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "reasoning": {
-                    "type": "string",
-                    "description": "Brief rationale for the actions and sleep choice.",
-                },
-                "actions": {
-                    "type": "array",
-                    "description": "Simulated actions to take now (may be empty).",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "type": {"type": "string", "enum": list(ACTION_TYPES)},
-                            "params": {
-                                "type": "object",
-                                "description": "Free-form details, e.g. a message body or note.",
+# One-line description of each action, used to build the system prompt for
+# whatever subset a supervisor has enabled.
+_ACTION_DESCRIPTIONS = {
+    "message_fulfillment_team": "coordinate order preparation.",
+    "message_payments_team": "resolve payment problems (e.g. payment_failed).",
+    "message_logistics_team": "chase shipping/delivery issues (e.g. shipment_delayed).",
+    "message_customer": "proactively update or reassure the customer.",
+    "create_internal_note": "record an observation for the audit trail.",
+}
+
+
+def _allowed_actions(inp: AgentStepInput) -> list[str]:
+    """The actions this supervisor may take — its ``tools_enabled`` intersected
+    with the known action set. Empty/unset means all actions are available."""
+    allowed = [t for t in inp.tools_enabled if t in ACTION_TYPES]
+    return allowed or list(ACTION_TYPES)
+
+
+def _decision_tool(allowed: list[str]) -> dict:
+    """Build the decision tool schema, constraining ``actions[].type`` to the
+    supervisor's enabled actions so the model can only pick allowed tools."""
+    return {
+        "type": "function",
+        "function": {
+            "name": "submit_decision",
+            "description": "Record your supervision decision for this step.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reasoning": {
+                        "type": "string",
+                        "description": "Brief rationale for the actions and sleep choice.",
+                    },
+                    "actions": {
+                        "type": "array",
+                        "description": "Simulated actions to take now (may be empty).",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "type": {"type": "string", "enum": allowed},
+                                "params": {
+                                    "type": "object",
+                                    "description": "Free-form details, e.g. a message body or note.",
+                                },
                             },
+                            "required": ["type"],
                         },
-                        "required": ["type"],
+                    },
+                    "memory_update": {
+                        "type": "string",
+                        "description": "The full, compact rolling memory summary to store going forward.",
+                    },
+                    "sleep_for_seconds": {
+                        "type": "integer",
+                        "description": "How long to sleep before the next scheduled check.",
+                    },
+                    "complete_recommendation": {
+                        "type": "boolean",
+                        "description": "Whether you believe the order is effectively resolved. "
+                        "(The workflow — not you — decides when the run actually ends.)",
                     },
                 },
-                "memory_update": {
-                    "type": "string",
-                    "description": "The full, compact rolling memory summary to store going forward.",
-                },
-                "sleep_for_seconds": {
-                    "type": "integer",
-                    "description": "How long to sleep before the next scheduled check.",
-                },
-                "complete_recommendation": {
-                    "type": "boolean",
-                    "description": "Whether you believe the order is effectively resolved. "
-                    "(The workflow — not you — decides when the run actually ends.)",
-                },
+                "required": ["reasoning", "actions", "sleep_for_seconds", "complete_recommendation"],
             },
-            "required": ["reasoning", "actions", "sleep_for_seconds", "complete_recommendation"],
         },
-    },
-}
+    }
 
 _SUMMARY_TOOL = {
     "type": "function",
@@ -102,18 +123,15 @@ _SUMMARY_TOOL = {
 }
 
 
-def _system_prompt(base_instruction: str) -> str:
+def _system_prompt(base_instruction: str, allowed: list[str]) -> str:
+    action_lines = "\n".join(f"- {t}: {_ACTION_DESCRIPTIONS[t]}" for t in allowed)
     return (
         "You are an autonomous supervisor watching a single e-commerce order from "
         "creation to completion. You wake on order events and on a schedule, decide "
         "what to do, then sleep until the next check.\n\n"
         f"Supervisor instruction: {base_instruction}\n\n"
-        "You may take these simulated actions (each is logged; nothing is really sent):\n"
-        "- message_fulfillment_team: coordinate order preparation.\n"
-        "- message_payments_team: resolve payment problems (e.g. payment_failed).\n"
-        "- message_logistics_team: chase shipping/delivery issues (e.g. shipment_delayed).\n"
-        "- message_customer: proactively update or reassure the customer.\n"
-        "- create_internal_note: record an observation for the audit trail.\n\n"
+        "You may take ONLY these simulated actions (each is logged; nothing is really sent):\n"
+        f"{action_lines}\n\n"
         "Guidance: act only when it helps; a routine check with nothing wrong needs no "
         "action. Keep the memory summary short and cumulative. Choose a sleep duration "
         "that fits the situation (shorter when actively handling a problem, longer when "
@@ -153,23 +171,26 @@ def _extract_tool_args(message, tool_name: str) -> dict:
 
 async def decide(inp: AgentStepInput) -> AgentDecision:
     client = _get_client()
+    allowed = _allowed_actions(inp)
     response = await client.chat.completions.create(
         model=settings.llm_model,
         temperature=settings.llm_temperature,
         messages=[
-            {"role": "system", "content": _system_prompt(inp.base_instruction)},
+            {"role": "system", "content": _system_prompt(inp.base_instruction, allowed)},
             {"role": "user", "content": _step_user_message(inp)},
         ],
-        tools=[_DECISION_TOOL],
+        tools=[_decision_tool(allowed)],
         tool_choice={"type": "function", "function": {"name": "submit_decision"}},
     )
     args = _extract_tool_args(response.choices[0].message, "submit_decision")
 
     raw_actions = args.get("actions") or []
+    # Belt-and-braces: the schema already constrains the enum, but filter the
+    # returned actions against the supervisor's allowed set too.
     actions = [
         AgentAction(type=a["type"], params=a.get("params") or {})
         for a in raw_actions
-        if a.get("type") in ACTION_TYPES
+        if a.get("type") in allowed
     ]
     sleep_for = args.get("sleep_for_seconds")
     return AgentDecision(
@@ -187,7 +208,7 @@ async def summarize(inp: AgentStepInput) -> dict:
         model=settings.llm_model,
         temperature=settings.llm_temperature,
         messages=[
-            {"role": "system", "content": _system_prompt(inp.base_instruction)},
+            {"role": "system", "content": _system_prompt(inp.base_instruction, _allowed_actions(inp))},
             {
                 "role": "user",
                 "content": (
